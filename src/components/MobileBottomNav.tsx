@@ -2,7 +2,7 @@
 
 'use client';
 
-import { Box, Cat, Clover, Film, Home, Radio, Star, Tv } from 'lucide-react';
+import { Box, Cat, Clover, Film, Globe, Home, PlaySquare, Radio, Star, Tv } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -23,6 +23,11 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
   const [navItems, setNavItems] = useState([
     { icon: Home, label: '首页', href: '/' },
     {
+      icon: Globe,
+      label: '源浏览',
+      href: '/source-browser',
+    },
+    {
       icon: Film,
       label: '电影',
       href: '/douban?type=movie',
@@ -31,6 +36,11 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       icon: Tv,
       label: '剧集',
       href: '/douban?type=tv',
+    },
+    {
+      icon: PlaySquare,
+      label: '短剧',
+      href: '/shortdrama',
     },
     {
       icon: Cat,
@@ -46,11 +56,6 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
       icon: Radio,
       label: '直播',
       href: '/live',
-    },
-    {
-      icon: Box,
-      label: '盒子',
-      href: '/tvbox',
     },
   ]);
 
@@ -78,13 +83,14 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
     return (
       decodedActive === decodedItemHref ||
       (decodedActive.startsWith('/douban') &&
-        decodedActive.includes(`type=${typeMatch}`))
+        decodedActive.includes(`type=${typeMatch}`)) ||
+      (href === '/shortdrama' && decodedActive.startsWith('/shortdrama'))
     );
   };
 
   return (
     <nav
-      className='md:hidden fixed left-0 right-0 z-[600] bg-white/90 backdrop-blur-xl border-t border-gray-200/50 overflow-hidden dark:bg-gray-900/80 dark:border-gray-700/50'
+      className='md:hidden fixed left-0 right-0 z-600 bg-white/90 backdrop-blur-xl border-t border-gray-200/50 overflow-hidden dark:bg-gray-900/80 dark:border-gray-700/50'
       style={{
         /* 紧贴视口底部，同时在内部留出安全区高度 */
         bottom: 0,
@@ -98,7 +104,7 @@ const MobileBottomNav = ({ activePath }: MobileBottomNavProps) => {
           return (
             <li
               key={item.href}
-              className='flex-shrink-0'
+              className='shrink-0'
               style={{ 
                 width: `${100 / navItems.length}vw`, 
                 minWidth: `${100 / navItems.length}vw` 

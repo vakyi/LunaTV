@@ -3,7 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
-import { getConfig } from '@/lib/config';
+import { clearConfigCache, getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 
 export const runtime = 'nodejs';
@@ -38,7 +38,11 @@ export async function POST(request: NextRequest) {
       DoubanImageProxyType,
       DoubanImageProxy,
       DisableYellowFilter,
+      ShowAdultContent,
       FluidSearch,
+      TMDBApiKey,
+      TMDBLanguage,
+      EnableTMDBActorSearch,
     } = body as {
       SiteName: string;
       Announcement: string;
@@ -49,7 +53,11 @@ export async function POST(request: NextRequest) {
       DoubanImageProxyType: string;
       DoubanImageProxy: string;
       DisableYellowFilter: boolean;
+      ShowAdultContent: boolean;
       FluidSearch: boolean;
+      TMDBApiKey?: string;
+      TMDBLanguage?: string;
+      EnableTMDBActorSearch?: boolean;
     };
 
     // 参数校验
@@ -81,8 +89,9 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 更新缓存中的站点设置
+    // 更新缓存中的站点设置，保留现有的自定义去广告配置
     adminConfig.SiteConfig = {
+      ...adminConfig.SiteConfig, // 保留所有现有字段
       SiteName,
       Announcement,
       SearchDownstreamMaxPage,
@@ -92,11 +101,18 @@ export async function POST(request: NextRequest) {
       DoubanImageProxyType,
       DoubanImageProxy,
       DisableYellowFilter,
+      ShowAdultContent,
       FluidSearch,
+      TMDBApiKey: TMDBApiKey || '',
+      TMDBLanguage: TMDBLanguage || 'zh-CN',
+      EnableTMDBActorSearch: EnableTMDBActorSearch || false,
     };
 
     // 写入数据库
     await db.saveAdminConfig(adminConfig);
+    
+    // 清除配置缓存，强制下次重新从数据库读取
+    clearConfigCache();
 
     return NextResponse.json(
       { ok: true },

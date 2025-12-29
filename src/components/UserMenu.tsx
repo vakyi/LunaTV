@@ -3,14 +3,21 @@
 'use client';
 
 import {
+  BarChart3,
+  Bell,
+  Calendar,
   Check,
   ChevronDown,
   ExternalLink,
+  Heart,
   KeyRound,
   LogOut,
+  PlayCircle,
   Settings,
   Shield,
+  Tv,
   User,
+  Users,
   X,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -20,8 +27,22 @@ import { createPortal } from 'react-dom';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import { CURRENT_VERSION } from '@/lib/version';
 import { checkForUpdates, UpdateStatus } from '@/lib/version_check';
+import {
+  getCachedWatchingUpdates,
+  getDetailedWatchingUpdates,
+  subscribeToWatchingUpdatesEvent,
+  checkWatchingUpdates,
+  type WatchingUpdate,
+} from '@/lib/watching-updates';
+import {
+  getAllPlayRecords,
+  forceRefreshPlayRecordsCache,
+  type PlayRecord,
+} from '@/lib/db.client';
+import type { Favorite } from '@/lib/types';
 
 import { VersionPanel } from './VersionPanel';
+import VideoCard from './VideoCard';
 
 interface AuthInfo {
   username?: string;
@@ -34,13 +55,27 @@ export const UserMenu: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
   const [isVersionPanelOpen, setIsVersionPanelOpen] = useState(false);
+  const [isWatchingUpdatesOpen, setIsWatchingUpdatesOpen] = useState(false);
+  const [isContinueWatchingOpen, setIsContinueWatchingOpen] = useState(false);
+  const [isFavoritesOpen, setIsFavoritesOpen] = useState(false);
   const [authInfo, setAuthInfo] = useState<AuthInfo | null>(null);
-  const [storageType, setStorageType] = useState<string>('localstorage');
+  const [storageType, setStorageType] = useState<string>(() => {
+    // 🔧 优化：直接从 RUNTIME_CONFIG 读取初始值，避免默认值导致的多次渲染
+    if (typeof window !== 'undefined') {
+      return (window as any).RUNTIME_CONFIG?.STORAGE_TYPE || 'localstorage';
+    }
+    return 'localstorage';
+  });
   const [mounted, setMounted] = useState(false);
+  const [watchingUpdates, setWatchingUpdates] = useState<WatchingUpdate | null>(null);
+  const [playRecords, setPlayRecords] = useState<(PlayRecord & { key: string })[]>([]);
+  const [favorites, setFavorites] = useState<(Favorite & { key: string })[]>([]);
+  const [hasUnreadUpdates, setHasUnreadUpdates] = useState(false);
+  const [showWatchRoom, setShowWatchRoom] = useState(false);
 
   // Body 滚动锁定 - 使用 overflow 方式避免布局问题
   useEffect(() => {
-    if (isSettingsOpen || isChangePasswordOpen) {
+    if (isSettingsOpen || isChangePasswordOpen || isWatchingUpdatesOpen || isContinueWatchingOpen || isFavoritesOpen) {
       const body = document.body;
       const html = document.documentElement;
 
@@ -59,7 +94,7 @@ export const UserMenu: React.FC = () => {
         html.style.overflow = originalHtmlOverflow;
       };
     }
-  }, [isSettingsOpen, isChangePasswordOpen]);
+  }, [isSettingsOpen, isChangePasswordOpen, isWatchingUpdatesOpen, isContinueWatchingOpen, isFavoritesOpen]);
 
   // 设置相关状态
   const [defaultAggregateSearch, setDefaultAggregateSearch] = useState(true);
@@ -67,12 +102,24 @@ export const UserMenu: React.FC = () => {
   const [enableOptimization, setEnableOptimization] = useState(false);
   const [fluidSearch, setFluidSearch] = useState(true);
   const [liveDirectConnect, setLiveDirectConnect] = useState(false);
+  const [playerBufferMode, setPlayerBufferMode] = useState<
+    'standard' | 'enhanced' | 'max'
+  >('standard');
   const [doubanDataSource, setDoubanDataSource] = useState('direct');
   const [doubanImageProxyType, setDoubanImageProxyType] = useState('direct');
   const [doubanImageProxyUrl, setDoubanImageProxyUrl] = useState('');
+  const [continueWatchingMinProgress, setContinueWatchingMinProgress] = useState(5);
+  const [continueWatchingMaxProgress, setContinueWatchingMaxProgress] = useState(100);
+  const [enableContinueWatchingFilter, setEnableContinueWatchingFilter] = useState(false);
   const [isDoubanDropdownOpen, setIsDoubanDropdownOpen] = useState(false);
   const [isDoubanImageProxyDropdownOpen, setIsDoubanImageProxyDropdownOpen] =
     useState(false);
+  // 跳过片头片尾相关设置
+  const [enableAutoSkip, setEnableAutoSkip] = useState(true);
+  const [enableAutoNextEpisode, setEnableAutoNextEpisode] = useState(true);
+
+  // 下载相关设置
+  const [downloadFormat, setDownloadFormat] = useState<'TS' | 'MP4'>('TS');
 
   // 豆瓣数据源选项
   const doubanDataSourceOptions = [
@@ -99,6 +146,31 @@ export const UserMenu: React.FC = () => {
     { value: 'custom', label: '自定义代理' },
   ];
 
+  // 播放缓冲模式选项
+  const bufferModeOptions = [
+    {
+      value: 'standard' as const,
+      label: '默认模式',
+      description: '标准缓冲设置，适合网络稳定的环境',
+      icon: '🎯',
+      color: 'green',
+    },
+    {
+      value: 'enhanced' as const,
+      label: '增强模式',
+      description: '1.5倍缓冲，适合偶尔卡顿的网络环境',
+      icon: '⚡',
+      color: 'blue',
+    },
+    {
+      value: 'max' as const,
+      label: '强力模式',
+      description: '3倍大缓冲，起播稍慢但播放更流畅',
+      icon: '🚀',
+      color: 'purple',
+    },
+  ];
+
   // 修改密码相关状态
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -114,16 +186,28 @@ export const UserMenu: React.FC = () => {
     setMounted(true);
   }, []);
 
-  // 获取认证信息和存储类型
+  // 获取认证信息
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const auth = getAuthInfoFromBrowserCookie();
       setAuthInfo(auth);
-
-      const type =
-        (window as any).RUNTIME_CONFIG?.STORAGE_TYPE || 'localstorage';
-      setStorageType(type);
     }
+  }, []);
+
+  // 检查观影室功能是否启用
+  useEffect(() => {
+    const checkWatchRoomConfig = async () => {
+      try {
+        const response = await fetch('/api/watch-room/config');
+        const config = await response.json();
+        setShowWatchRoom(config.enabled === true);
+      } catch (error) {
+        console.error('Failed to check watch room config:', error);
+        setShowWatchRoom(false);
+      }
+    };
+
+    checkWatchRoomConfig();
   }, []);
 
   // 从 localStorage 读取设置
@@ -158,7 +242,7 @@ export const UserMenu: React.FC = () => {
         'doubanImageProxyType'
       );
       const defaultDoubanImageProxyType =
-        (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY_TYPE || 'direct';
+        (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY_TYPE || 'server';
       if (savedDoubanImageProxyType !== null) {
         setDoubanImageProxyType(savedDoubanImageProxyType);
       } else if (defaultDoubanImageProxyType) {
@@ -195,6 +279,48 @@ export const UserMenu: React.FC = () => {
       if (savedLiveDirectConnect !== null) {
         setLiveDirectConnect(JSON.parse(savedLiveDirectConnect));
       }
+
+      // 读取播放缓冲模式
+      const savedBufferMode = localStorage.getItem('playerBufferMode');
+      if (
+        savedBufferMode === 'standard' ||
+        savedBufferMode === 'enhanced' ||
+        savedBufferMode === 'max'
+      ) {
+        setPlayerBufferMode(savedBufferMode);
+      }
+
+      const savedContinueWatchingMinProgress = localStorage.getItem('continueWatchingMinProgress');
+      if (savedContinueWatchingMinProgress !== null) {
+        setContinueWatchingMinProgress(parseInt(savedContinueWatchingMinProgress));
+      }
+
+      const savedContinueWatchingMaxProgress = localStorage.getItem('continueWatchingMaxProgress');
+      if (savedContinueWatchingMaxProgress !== null) {
+        setContinueWatchingMaxProgress(parseInt(savedContinueWatchingMaxProgress));
+      }
+
+      const savedEnableContinueWatchingFilter = localStorage.getItem('enableContinueWatchingFilter');
+      if (savedEnableContinueWatchingFilter !== null) {
+        setEnableContinueWatchingFilter(JSON.parse(savedEnableContinueWatchingFilter));
+      }
+
+      // 读取跳过片头片尾设置（默认开启）
+      const savedEnableAutoSkip = localStorage.getItem('enableAutoSkip');
+      if (savedEnableAutoSkip !== null) {
+        setEnableAutoSkip(JSON.parse(savedEnableAutoSkip));
+      }
+
+      const savedEnableAutoNextEpisode = localStorage.getItem('enableAutoNextEpisode');
+      if (savedEnableAutoNextEpisode !== null) {
+        setEnableAutoNextEpisode(JSON.parse(savedEnableAutoNextEpisode));
+      }
+
+      // 读取下载格式设置
+      const savedDownloadFormat = localStorage.getItem('downloadFormat');
+      if (savedDownloadFormat === 'TS' || savedDownloadFormat === 'MP4') {
+        setDownloadFormat(savedDownloadFormat);
+      }
     }
   }, []);
 
@@ -213,6 +339,196 @@ export const UserMenu: React.FC = () => {
 
     checkUpdate();
   }, []);
+
+  // 获取观看更新信息
+  useEffect(() => {
+    console.log('UserMenu watching-updates 检查条件:', {
+      'window': typeof window !== 'undefined',
+      'authInfo.username': authInfo?.username,
+      'storageType': storageType,
+      'storageType !== localstorage': storageType !== 'localstorage'
+    });
+
+    if (typeof window !== 'undefined' && authInfo?.username && storageType !== 'localstorage') {
+      console.log('开始加载 watching-updates 数据...');
+
+      const updateWatchingUpdates = () => {
+        const updates = getDetailedWatchingUpdates();
+        console.log('getDetailedWatchingUpdates 返回:', updates);
+        setWatchingUpdates(updates);
+
+        // 检测是否有新更新（只检查新剧集更新，不包括继续观看）
+        if (updates && (updates.updatedCount || 0) > 0) {
+          const lastViewed = parseInt(localStorage.getItem('watchingUpdatesLastViewed') || '0');
+          const currentTime = Date.now();
+
+          // 如果从未查看过，或者距离上次查看超过1分钟，认为有新更新
+          const hasNewUpdates = lastViewed === 0 || (currentTime - lastViewed > 60000);
+          setHasUnreadUpdates(hasNewUpdates);
+        } else {
+          setHasUnreadUpdates(false);
+        }
+      };
+
+      // 页面初始化时强制检查一次更新（绕过缓存限制）
+      const forceInitialCheck = async () => {
+        console.log('页面初始化，强制检查更新...');
+        try {
+          // 🔧 修复：直接使用 forceRefresh=true，不再手动操作 localStorage
+          // 因为 kvrocks 模式使用内存缓存，删除 localStorage 无效
+          await checkWatchingUpdates(true);
+
+          // 更新UI
+          updateWatchingUpdates();
+          console.log('页面初始化更新检查完成');
+        } catch (error) {
+          console.error('页面初始化检查更新失败:', error);
+          // 失败时仍然尝试从缓存加载
+          updateWatchingUpdates();
+        }
+      };
+
+      // 先尝试从缓存加载，然后强制检查
+      const cachedUpdates = getCachedWatchingUpdates();
+      if (cachedUpdates) {
+        console.log('发现缓存数据，先加载缓存');
+        updateWatchingUpdates();
+      }
+
+      // 🔧 修复：延迟1秒后在后台执行更新检查，避免阻塞页面初始加载
+      setTimeout(() => {
+        forceInitialCheck();
+      }, 1000);
+
+      // 订阅更新事件
+      const unsubscribe = subscribeToWatchingUpdatesEvent(() => {
+        console.log('收到 watching-updates 事件，更新数据...');
+        updateWatchingUpdates();
+      });
+
+      return unsubscribe;
+    } else {
+      console.log('watching-updates 条件不满足，跳过加载');
+    }
+  }, [authInfo, storageType]);
+
+  // 加载播放记录（优化版）
+  useEffect(() => {
+    if (typeof window !== 'undefined' && authInfo?.username && storageType !== 'localstorage') {
+      const loadPlayRecords = async () => {
+        try {
+          const records = await getAllPlayRecords();
+          const recordsArray = Object.entries(records).map(([key, record]) => ({
+            ...record,
+            key,
+          }));
+
+          // 筛选真正需要继续观看的记录
+          const validPlayRecords = recordsArray.filter(record => {
+            const progress = getProgress(record);
+
+            // 播放时间必须超过2分钟
+            if (record.play_time < 120) return false;
+
+            // 如果禁用了进度筛选，则显示所有播放时间超过2分钟的记录
+            if (!enableContinueWatchingFilter) return true;
+
+            // 根据用户自定义的进度范围筛选
+            return progress >= continueWatchingMinProgress && progress <= continueWatchingMaxProgress;
+          });
+
+          // 按最后播放时间降序排列
+          const sortedRecords = validPlayRecords.sort((a, b) => b.save_time - a.save_time);
+          setPlayRecords(sortedRecords.slice(0, 12)); // 只取最近的12个
+        } catch (error) {
+          console.error('加载播放记录失败:', error);
+        }
+      };
+
+      loadPlayRecords();
+
+      // 监听播放记录更新事件（修复删除记录后页面不立即更新的问题）
+      const handlePlayRecordsUpdate = () => {
+        console.log('UserMenu: 播放记录更新，重新加载继续观看列表');
+        loadPlayRecords();
+      };
+
+      // 监听播放记录更新事件
+      window.addEventListener('playRecordsUpdated', handlePlayRecordsUpdate);
+
+      // 🔥 新增：监听watching-updates事件，与ContinueWatching组件保持一致
+      const unsubscribeWatchingUpdates = subscribeToWatchingUpdatesEvent(() => {
+        console.log('UserMenu: 收到watching-updates事件');
+
+        // 当检测到新集数更新时，强制刷新播放记录缓存确保数据同步
+        const updates = getDetailedWatchingUpdates();
+        if (updates && updates.hasUpdates && updates.updatedCount > 0) {
+          console.log('UserMenu: 检测到新集数更新，强制刷新播放记录缓存');
+          forceRefreshPlayRecordsCache();
+
+          // 短暂延迟后重新获取播放记录，确保缓存已刷新
+          setTimeout(async () => {
+            const freshRecords = await getAllPlayRecords();
+            const recordsArray = Object.entries(freshRecords).map(([key, record]) => ({
+              ...record,
+              key,
+            }));
+            const validPlayRecords = recordsArray.filter(record => {
+              const progress = getProgress(record);
+              if (record.play_time < 120) return false;
+              if (!enableContinueWatchingFilter) return true;
+              return progress >= continueWatchingMinProgress && progress <= continueWatchingMaxProgress;
+            });
+            const sortedRecords = validPlayRecords.sort((a, b) => b.save_time - a.save_time);
+            setPlayRecords(sortedRecords.slice(0, 12));
+          }, 100);
+        }
+      });
+
+      return () => {
+        window.removeEventListener('playRecordsUpdated', handlePlayRecordsUpdate);
+        unsubscribeWatchingUpdates(); // 🔥 清理watching-updates订阅
+      };
+    }
+  }, [authInfo, storageType, enableContinueWatchingFilter, continueWatchingMinProgress, continueWatchingMaxProgress]);
+
+  // 加载收藏数据
+  useEffect(() => {
+    if (typeof window !== 'undefined' && authInfo?.username && storageType !== 'localstorage') {
+      const loadFavorites = async () => {
+        try {
+          const response = await fetch('/api/favorites');
+          if (response.ok) {
+            const favoritesData = await response.json() as Record<string, Favorite>;
+            const favoritesArray = Object.entries(favoritesData).map(([key, favorite]) => ({
+              ...(favorite as Favorite),
+              key,
+            }));
+            // 按保存时间降序排列
+            const sortedFavorites = favoritesArray.sort((a, b) => b.save_time - a.save_time);
+            setFavorites(sortedFavorites);
+          }
+        } catch (error) {
+          console.error('加载收藏失败:', error);
+        }
+      };
+
+      loadFavorites();
+
+      // 监听收藏更新事件（修复删除收藏后页面不立即更新的问题）
+      const handleFavoritesUpdate = () => {
+        console.log('UserMenu: 收藏更新，重新加载收藏列表');
+        loadFavorites();
+      };
+
+      // 监听收藏更新事件
+      window.addEventListener('favoritesUpdated', handleFavoritesUpdate);
+
+      return () => {
+        window.removeEventListener('favoritesUpdated', handleFavoritesUpdate);
+      };
+    }
+  }, [authInfo, storageType]);
 
   // 点击外部区域关闭下拉框
   useEffect(() => {
@@ -249,8 +565,45 @@ export const UserMenu: React.FC = () => {
     }
   }, [isDoubanImageProxyDropdownOpen]);
 
-  const handleMenuClick = () => {
-    setIsOpen(!isOpen);
+  const handleMenuClick = async () => {
+    const willOpen = !isOpen;
+    setIsOpen(willOpen);
+
+    // 如果是打开菜单，立即检查更新（不受缓存限制）
+    if (willOpen && authInfo?.username && storageType !== 'localstorage') {
+      console.log('打开菜单时强制检查更新...');
+      try {
+        // 暂时清除缓存时间，强制检查一次
+        const lastCheckTime = localStorage.getItem('moontv_last_update_check');
+        localStorage.removeItem('moontv_last_update_check');
+
+        // 执行检查
+        await checkWatchingUpdates();
+
+        // 恢复缓存时间（如果之前有的话）
+        if (lastCheckTime) {
+          localStorage.setItem('moontv_last_update_check', lastCheckTime);
+        }
+
+        // 更新UI状态
+        const updates = getDetailedWatchingUpdates();
+        setWatchingUpdates(updates);
+
+        // 重新计算未读状态
+        if (updates && (updates.updatedCount || 0) > 0) {
+          const lastViewed = parseInt(localStorage.getItem('watchingUpdatesLastViewed') || '0');
+          const currentTime = Date.now();
+          const hasNewUpdates = lastViewed === 0 || (currentTime - lastViewed > 60000);
+          setHasUnreadUpdates(hasNewUpdates);
+        } else {
+          setHasUnreadUpdates(false);
+        }
+
+        console.log('菜单打开时的更新检查完成');
+      } catch (error) {
+        console.error('菜单打开时检查更新失败:', error);
+      }
+    }
   };
 
   const handleCloseMenu = () => {
@@ -271,6 +624,85 @@ export const UserMenu: React.FC = () => {
 
   const handleAdminPanel = () => {
     router.push('/admin');
+  };
+
+  const handlePlayStats = () => {
+    setIsOpen(false);
+    router.push('/play-stats');
+  };
+
+  const handleTVBoxConfig = () => {
+    setIsOpen(false);
+    router.push('/tvbox');
+  };
+
+  const handleWatchRoom = () => {
+    setIsOpen(false);
+    router.push('/watch-room');
+  };
+
+  const handleReleaseCalendar = () => {
+    setIsOpen(false);
+    router.push('/release-calendar');
+  };
+
+  const handleWatchingUpdates = () => {
+    setIsOpen(false);
+    setIsWatchingUpdatesOpen(true);
+    // 标记为已读
+    setHasUnreadUpdates(false);
+    const currentTime = Date.now();
+    localStorage.setItem('watchingUpdatesLastViewed', currentTime.toString());
+  };
+
+  const handleCloseWatchingUpdates = () => {
+    setIsWatchingUpdatesOpen(false);
+  };
+
+  const handleContinueWatching = () => {
+    setIsOpen(false);
+    setIsContinueWatchingOpen(true);
+  };
+
+  const handleCloseContinueWatching = () => {
+    setIsContinueWatchingOpen(false);
+  };
+
+  const handleFavorites = () => {
+    setIsOpen(false);
+    setIsFavoritesOpen(true);
+  };
+
+  const handleCloseFavorites = () => {
+    setIsFavoritesOpen(false);
+  };
+
+  // 从 key 中解析 source 和 id
+  const parseKey = (key: string) => {
+    const [source, id] = key.split('+');
+    return { source, id };
+  };
+
+  // 计算播放进度百分比
+  const getProgress = (record: PlayRecord) => {
+    if (record.total_time === 0) return 0;
+    return (record.play_time / record.total_time) * 100;
+  };
+
+  // 检查播放记录是否有新集数更新
+  const getNewEpisodesCount = (record: PlayRecord & { key: string }): number => {
+    if (!watchingUpdates || !watchingUpdates.updatedSeries) return 0;
+
+    const { source, id } = parseKey(record.key);
+
+    // 在watchingUpdates中查找匹配的剧集
+    const matchedSeries = watchingUpdates.updatedSeries.find(series =>
+      series.sourceKey === source &&
+      series.videoId === id &&
+      series.hasNewEpisode
+    );
+
+    return matchedSeries ? (matchedSeries.newEpisodes || 0) : 0;
   };
 
   const handleChangePassword = () => {
@@ -377,6 +809,52 @@ export const UserMenu: React.FC = () => {
     }
   };
 
+  const handleBufferModeChange = (value: 'standard' | 'enhanced' | 'max') => {
+    setPlayerBufferMode(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('playerBufferMode', value);
+    }
+  };
+
+  const handleContinueWatchingMinProgressChange = (value: number) => {
+    setContinueWatchingMinProgress(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('continueWatchingMinProgress', value.toString());
+    }
+  };
+
+  const handleContinueWatchingMaxProgressChange = (value: number) => {
+    setContinueWatchingMaxProgress(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('continueWatchingMaxProgress', value.toString());
+    }
+  };
+
+  const handleEnableContinueWatchingFilterToggle = (value: boolean) => {
+    setEnableContinueWatchingFilter(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('enableContinueWatchingFilter', JSON.stringify(value));
+    }
+  };
+
+  const handleEnableAutoSkipToggle = (value: boolean) => {
+    setEnableAutoSkip(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('enableAutoSkip', JSON.stringify(value));
+      // 🔑 通知 SkipController localStorage 已更新
+      window.dispatchEvent(new Event('localStorageChanged'));
+    }
+  };
+
+  const handleEnableAutoNextEpisodeToggle = (value: boolean) => {
+    setEnableAutoNextEpisode(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('enableAutoNextEpisode', JSON.stringify(value));
+      // 🔑 通知 SkipController localStorage 已更新
+      window.dispatchEvent(new Event('localStorageChanged'));
+    }
+  };
+
   const handleDoubanDataSourceChange = (value: string) => {
     setDoubanDataSource(value);
     if (typeof window !== 'undefined') {
@@ -395,6 +873,13 @@ export const UserMenu: React.FC = () => {
     setDoubanImageProxyUrl(value);
     if (typeof window !== 'undefined') {
       localStorage.setItem('doubanImageProxyUrl', value);
+    }
+  };
+
+  const handleDownloadFormatChange = (value: 'TS' | 'MP4') => {
+    setDownloadFormat(value);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('downloadFormat', value);
     }
   };
 
@@ -423,7 +908,7 @@ export const UserMenu: React.FC = () => {
     const defaultDoubanProxy =
       (window as any).RUNTIME_CONFIG?.DOUBAN_PROXY || '';
     const defaultDoubanImageProxyType =
-      (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY_TYPE || 'direct';
+      (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY_TYPE || 'server';
     const defaultDoubanImageProxyUrl =
       (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY || '';
     const defaultFluidSearch =
@@ -437,6 +922,13 @@ export const UserMenu: React.FC = () => {
     setDoubanDataSource(defaultDoubanProxyType);
     setDoubanImageProxyType(defaultDoubanImageProxyType);
     setDoubanImageProxyUrl(defaultDoubanImageProxyUrl);
+    setContinueWatchingMinProgress(5);
+    setContinueWatchingMaxProgress(100);
+    setEnableContinueWatchingFilter(false);
+    setEnableAutoSkip(true);
+    setEnableAutoNextEpisode(true);
+    setPlayerBufferMode('standard');
+    setDownloadFormat('TS');
 
     if (typeof window !== 'undefined') {
       localStorage.setItem('defaultAggregateSearch', JSON.stringify(true));
@@ -447,6 +939,13 @@ export const UserMenu: React.FC = () => {
       localStorage.setItem('doubanDataSource', defaultDoubanProxyType);
       localStorage.setItem('doubanImageProxyType', defaultDoubanImageProxyType);
       localStorage.setItem('doubanImageProxyUrl', defaultDoubanImageProxyUrl);
+      localStorage.setItem('continueWatchingMinProgress', '5');
+      localStorage.setItem('continueWatchingMaxProgress', '100');
+      localStorage.setItem('enableContinueWatchingFilter', JSON.stringify(false));
+      localStorage.setItem('enableAutoSkip', JSON.stringify(true));
+      localStorage.setItem('enableAutoNextEpisode', JSON.stringify(true));
+      localStorage.setItem('playerBufferMode', 'standard');
+      localStorage.setItem('downloadFormat', 'TS');
     }
   };
 
@@ -457,6 +956,28 @@ export const UserMenu: React.FC = () => {
   // 检查是否显示修改密码按钮
   const showChangePassword =
     authInfo?.role !== 'owner' && storageType !== 'localstorage';
+
+  // 检查是否显示播放统计按钮（所有登录用户，且非localstorage存储）
+  const showPlayStats = authInfo?.username && storageType !== 'localstorage';
+
+  // 检查是否显示更新提醒按钮（登录用户且非localstorage存储就显示）
+  const showWatchingUpdates = authInfo?.username && storageType !== 'localstorage';
+
+  // 检查是否有实际更新（用于显示红点）- 只检查新剧集更新
+  const hasActualUpdates = watchingUpdates && (watchingUpdates.updatedCount || 0) > 0;
+
+  // 计算更新数量（只统计新剧集更新）
+  const totalUpdates = watchingUpdates?.updatedCount || 0;
+
+  // 调试信息
+  console.log('UserMenu 更新提醒调试:', {
+    username: authInfo?.username,
+    storageType,
+    watchingUpdates,
+    showWatchingUpdates,
+    hasActualUpdates,
+    totalUpdates
+  });
 
   // 角色中文映射
   const getRoleText = (role?: string) => {
@@ -477,14 +998,14 @@ export const UserMenu: React.FC = () => {
     <>
       {/* 背景遮罩 - 普通菜单无需模糊 */}
       <div
-        className='fixed inset-0 bg-transparent z-[1000]'
+        className='fixed inset-0 bg-transparent z-1000'
         onClick={handleCloseMenu}
       />
 
       {/* 菜单面板 */}
-      <div className='fixed top-14 right-4 w-56 bg-white dark:bg-gray-900 rounded-lg shadow-xl z-[1001] border border-gray-200/50 dark:border-gray-700/50 overflow-hidden select-none'>
+      <div className='fixed top-14 right-4 w-56 bg-white dark:bg-gray-900 rounded-lg shadow-xl z-1001 border border-gray-200/50 dark:border-gray-700/50 overflow-hidden select-none'>
         {/* 用户信息区域 */}
-        <div className='px-3 py-2.5 border-b border-gray-200 dark:border-gray-700 bg-gradient-to-r from-gray-50 to-gray-100/50 dark:from-gray-800 dark:to-gray-800/50'>
+        <div className='px-3 py-2.5 border-b border-gray-200 dark:border-gray-700 bg-linear-to-r from-gray-50 to-gray-100/50 dark:from-gray-800 dark:to-gray-800/50'>
           <div className='space-y-1'>
             <div className='flex items-center justify-between'>
               <span className='text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
@@ -518,20 +1039,108 @@ export const UserMenu: React.FC = () => {
           {/* 设置按钮 */}
           <button
             onClick={handleSettings}
-            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-sm'
+            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
           >
             <Settings className='w-4 h-4 text-gray-500 dark:text-gray-400' />
             <span className='font-medium'>设置</span>
           </button>
 
+          {/* 更新提醒按钮 */}
+          {showWatchingUpdates && (
+            <button
+              onClick={handleWatchingUpdates}
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm relative'
+            >
+              <Bell className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+              <span className='font-medium'>更新提醒</span>
+              {hasUnreadUpdates && totalUpdates > 0 && (
+                <div className='ml-auto flex items-center gap-1'>
+                  <span className='inline-flex items-center justify-center w-5 h-5 text-xs font-bold text-white bg-red-500 rounded-full'>
+                    {totalUpdates > 99 ? '99+' : totalUpdates}
+                  </span>
+                </div>
+              )}
+            </button>
+          )}
+
+          {/* 继续观看按钮 */}
+          {showWatchingUpdates && (
+            <button
+              onClick={handleContinueWatching}
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm relative'
+            >
+              <PlayCircle className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+              <span className='font-medium'>继续观看</span>
+              {playRecords.length > 0 && (
+                <span className='ml-auto text-xs text-gray-400'>{playRecords.length}</span>
+              )}
+            </button>
+          )}
+
+          {/* 我的收藏按钮 */}
+          {showWatchingUpdates && (
+            <button
+              onClick={handleFavorites}
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm relative'
+            >
+              <Heart className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+              <span className='font-medium'>我的收藏</span>
+              {favorites.length > 0 && (
+                <span className='ml-auto text-xs text-gray-400'>{favorites.length}</span>
+              )}
+            </button>
+          )}
+
           {/* 管理面板按钮 */}
           {showAdminPanel && (
             <button
               onClick={handleAdminPanel}
-              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-sm'
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
             >
               <Shield className='w-4 h-4 text-gray-500 dark:text-gray-400' />
               <span className='font-medium'>管理面板</span>
+            </button>
+          )}
+
+          {/* 播放统计按钮 */}
+          {showPlayStats && (
+            <button
+              onClick={handlePlayStats}
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
+            >
+              <BarChart3 className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+              <span className='font-medium'>
+                {authInfo?.role === 'owner' || authInfo?.role === 'admin' ? '播放统计' : '个人统计'}
+              </span>
+            </button>
+          )}
+
+          {/* 上映日程按钮 */}
+          <button
+            onClick={handleReleaseCalendar}
+            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
+          >
+            <Calendar className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+            <span className='font-medium'>上映日程</span>
+          </button>
+
+          {/* TVBox配置按钮 */}
+          <button
+            onClick={handleTVBoxConfig}
+            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
+          >
+            <Tv className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+            <span className='font-medium'>TVBox 配置</span>
+          </button>
+
+          {/* 观影室按钮 */}
+          {showWatchRoom && (
+            <button
+              onClick={handleWatchRoom}
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
+            >
+              <Users className='w-4 h-4 text-gray-500 dark:text-gray-400' />
+              <span className='font-medium'>观影室</span>
             </button>
           )}
 
@@ -539,7 +1148,7 @@ export const UserMenu: React.FC = () => {
           {showChangePassword && (
             <button
               onClick={handleChangePassword}
-              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-sm'
+              className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition-[background-color] duration-150 ease-in-out text-sm'
             >
               <KeyRound className='w-4 h-4 text-gray-500 dark:text-gray-400' />
               <span className='font-medium'>修改密码</span>
@@ -552,7 +1161,7 @@ export const UserMenu: React.FC = () => {
           {/* 登出按钮 */}
           <button
             onClick={handleLogout}
-            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors text-sm'
+            className='w-full px-3 py-2 text-left flex items-center gap-2.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-[background-color] duration-150 ease-in-out text-sm'
           >
             <LogOut className='w-4 h-4' />
             <span className='font-medium'>登出</span>
@@ -595,7 +1204,7 @@ export const UserMenu: React.FC = () => {
     <>
       {/* 背景遮罩 */}
       <div
-        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-[1000]'
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-1000'
         onClick={handleCloseSettings}
         onTouchMove={(e) => {
           // 只阻止滚动，允许其他触摸事件
@@ -612,7 +1221,7 @@ export const UserMenu: React.FC = () => {
 
       {/* 设置面板 */}
       <div
-        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-xl max-h-[90vh] bg-white dark:bg-gray-900 rounded-xl shadow-xl z-[1001] flex flex-col'
+        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-xl max-h-[90vh] bg-white dark:bg-gray-900 rounded-xl shadow-xl z-1001 flex flex-col'
       >
         {/* 内容容器 - 独立的滚动区域 */}
         <div
@@ -698,7 +1307,7 @@ export const UserMenu: React.FC = () => {
                       >
                         <span className='truncate'>{option.label}</span>
                         {doubanDataSource === option.value && (
-                          <Check className='w-4 h-4 text-green-600 dark:text-green-400 flex-shrink-0 ml-2' />
+                          <Check className='w-4 h-4 text-green-600 dark:text-green-400 shrink-0 ml-2' />
                         )}
                       </button>
                     ))}
@@ -803,7 +1412,7 @@ export const UserMenu: React.FC = () => {
                       >
                         <span className='truncate'>{option.label}</span>
                         {doubanImageProxyType === option.value && (
-                          <Check className='w-4 h-4 text-green-600 dark:text-green-400 flex-shrink-0 ml-2' />
+                          <Check className='w-4 h-4 text-green-600 dark:text-green-400 shrink-0 ml-2' />
                         )}
                       </button>
                     ))}
@@ -954,6 +1563,359 @@ export const UserMenu: React.FC = () => {
                 </div>
               </label>
             </div>
+
+            {/* 分割线 */}
+            <div className='border-t border-gray-200 dark:border-gray-700'></div>
+
+            {/* 播放缓冲优化 - 卡片式选择器 */}
+            <div className='space-y-3'>
+              <div>
+                <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                  播放缓冲优化
+                </h4>
+                <p className='text-xs text-gray-400 dark:text-gray-500 mt-1'>
+                  根据网络环境选择合适的缓冲模式，减少播放卡顿
+                </p>
+              </div>
+
+              {/* 模式选择卡片 */}
+              <div className='space-y-2'>
+                {bufferModeOptions.map((option) => {
+                  const isSelected = playerBufferMode === option.value;
+                  const colorClasses = {
+                    green: {
+                      selected:
+                        'border-transparent bg-linear-to-r from-green-50 to-emerald-50 dark:from-green-900/20 dark:to-emerald-900/20 ring-2 ring-green-400/60 dark:ring-green-500/50 shadow-[0_0_15px_-3px_rgba(34,197,94,0.4)] dark:shadow-[0_0_15px_-3px_rgba(34,197,94,0.3)]',
+                      icon: 'bg-linear-to-br from-green-100 to-emerald-100 dark:from-green-800/50 dark:to-emerald-800/50',
+                      check: 'text-green-500',
+                      label: 'text-green-700 dark:text-green-300',
+                    },
+                    blue: {
+                      selected:
+                        'border-transparent bg-linear-to-r from-blue-50 to-cyan-50 dark:from-blue-900/20 dark:to-cyan-900/20 ring-2 ring-blue-400/60 dark:ring-blue-500/50 shadow-[0_0_15px_-3px_rgba(59,130,246,0.4)] dark:shadow-[0_0_15px_-3px_rgba(59,130,246,0.3)]',
+                      icon: 'bg-linear-to-br from-blue-100 to-cyan-100 dark:from-blue-800/50 dark:to-cyan-800/50',
+                      check: 'text-blue-500',
+                      label: 'text-blue-700 dark:text-blue-300',
+                    },
+                    purple: {
+                      selected:
+                        'border-transparent bg-linear-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 ring-2 ring-purple-400/60 dark:ring-purple-500/50 shadow-[0_0_15px_-3px_rgba(168,85,247,0.4)] dark:shadow-[0_0_15px_-3px_rgba(168,85,247,0.3)]',
+                      icon: 'bg-linear-to-br from-purple-100 to-pink-100 dark:from-purple-800/50 dark:to-pink-800/50',
+                      check: 'text-purple-500',
+                      label: 'text-purple-700 dark:text-purple-300',
+                    },
+                  } as const;
+                  const colors =
+                    colorClasses[option.color as keyof typeof colorClasses];
+
+                  return (
+                    <button
+                      key={option.value}
+                      type='button'
+                      onClick={() => handleBufferModeChange(option.value)}
+                      className={`w-full p-3 rounded-xl border-2 transition-all duration-300 text-left flex items-center gap-3 ${
+                        isSelected
+                          ? colors.selected
+                          : 'border-gray-200 dark:border-gray-700 hover:border-gray-300 dark:hover:border-gray-600 hover:shadow-sm bg-white dark:bg-gray-800'
+                      }`}
+                    >
+                      {/* 图标 */}
+                      <div
+                        className={`w-10 h-10 rounded-lg flex items-center justify-center text-xl transition-all duration-300 ${
+                          isSelected
+                            ? colors.icon
+                            : 'bg-gray-100 dark:bg-gray-700'
+                        }`}
+                      >
+                        {option.icon}
+                      </div>
+
+                      {/* 文字内容 */}
+                      <div className='flex-1 min-w-0'>
+                        <div className='flex items-center gap-2'>
+                          <span
+                            className={`font-medium transition-colors duration-300 ${
+                              isSelected
+                                ? colors.label
+                                : 'text-gray-900 dark:text-gray-100'
+                            }`}
+                          >
+                            {option.label}
+                          </span>
+                        </div>
+                        <p className='text-xs text-gray-400 dark:text-gray-500 mt-0.5 line-clamp-1'>
+                          {option.description}
+                        </p>
+                      </div>
+
+                      {/* 选中标记 */}
+                      <div
+                        className={`w-5 h-5 rounded-full flex items-center justify-center transition-all duration-300 ${
+                          isSelected
+                            ? `${colors.check} scale-100`
+                            : 'text-transparent scale-75'
+                        }`}
+                      >
+                        <svg
+                          className='w-5 h-5'
+                          fill='currentColor'
+                          viewBox='0 0 20 20'
+                        >
+                          <path
+                            fillRule='evenodd'
+                            d='M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z'
+                            clipRule='evenodd'
+                          />
+                        </svg>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 分割线 */}
+            <div className='border-t border-gray-200 dark:border-gray-700'></div>
+
+            {/* 跳过片头片尾设置 */}
+            <div className='space-y-4'>
+              <div>
+                <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                  跳过片头片尾设置
+                </h4>
+                <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                  控制播放器默认的片头片尾跳过行为
+                </p>
+              </div>
+
+              {/* 自动跳过开关 */}
+              <div className='flex items-center justify-between'>
+                <div>
+                  <h5 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                    启用自动跳过
+                  </h5>
+                  <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                    开启后将自动跳过片头片尾，关闭则显示手动跳过按钮
+                  </p>
+                </div>
+                <label className='flex items-center cursor-pointer'>
+                  <div className='relative'>
+                    <input
+                      type='checkbox'
+                      className='sr-only peer'
+                      checked={enableAutoSkip}
+                      onChange={(e) => handleEnableAutoSkipToggle(e.target.checked)}
+                    />
+                    <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                    <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+                  </div>
+                </label>
+              </div>
+
+              {/* 自动播放下一集开关 */}
+              <div className='flex items-center justify-between'>
+                <div>
+                  <h5 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                    片尾自动播放下一集
+                  </h5>
+                  <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                    开启后片尾结束时自动跳转到下一集
+                  </p>
+                </div>
+                <label className='flex items-center cursor-pointer'>
+                  <div className='relative'>
+                    <input
+                      type='checkbox'
+                      className='sr-only peer'
+                      checked={enableAutoNextEpisode}
+                      onChange={(e) => handleEnableAutoNextEpisodeToggle(e.target.checked)}
+                    />
+                    <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                    <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+                  </div>
+                </label>
+              </div>
+
+              {/* 提示信息 */}
+              <div className='text-xs text-gray-500 dark:text-gray-400 bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg border border-blue-200 dark:border-blue-800'>
+                💡 这些设置会作为新视频的默认配置。对于已配置的视频，请在播放页面的"跳过设置"中单独调整。
+              </div>
+            </div>
+
+            {/* 分割线 */}
+            <div className='border-t border-gray-200 dark:border-gray-700'></div>
+
+            {/* 继续观看筛选设置 */}
+            <div className='space-y-4'>
+              <div className='flex items-center justify-between'>
+                <div>
+                  <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                    继续观看进度筛选
+                  </h4>
+                  <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                    是否启用"继续观看"的播放进度筛选功能
+                  </p>
+                </div>
+                <label className='flex items-center cursor-pointer'>
+                  <div className='relative'>
+                    <input
+                      type='checkbox'
+                      className='sr-only peer'
+                      checked={enableContinueWatchingFilter}
+                      onChange={(e) => handleEnableContinueWatchingFilterToggle(e.target.checked)}
+                    />
+                    <div className='w-11 h-6 bg-gray-300 rounded-full peer-checked:bg-green-500 transition-colors dark:bg-gray-600'></div>
+                    <div className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-5'></div>
+                  </div>
+                </label>
+              </div>
+
+              {/* 进度范围设置 - 仅在启用筛选时显示 */}
+              {enableContinueWatchingFilter && (
+                <>
+                  <div>
+                    <h5 className='text-sm font-medium text-gray-600 dark:text-gray-400 mb-3'>
+                      进度范围设置
+                    </h5>
+                  </div>
+
+                  <div className='grid grid-cols-2 gap-4'>
+                    {/* 最小进度设置 */}
+                    <div>
+                      <label className='block text-sm font-medium text-gray-600 dark:text-gray-400 mb-2'>
+                        最小进度 (%)
+                      </label>
+                      <input
+                        type='number'
+                        min='0'
+                        max='100'
+                        className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+                        value={continueWatchingMinProgress}
+                        onChange={(e) => {
+                          const value = Math.max(0, Math.min(100, parseInt(e.target.value) || 0));
+                          handleContinueWatchingMinProgressChange(value);
+                        }}
+                      />
+                    </div>
+
+                    {/* 最大进度设置 */}
+                    <div>
+                      <label className='block text-sm font-medium text-gray-600 dark:text-gray-400 mb-2'>
+                        最大进度 (%)
+                      </label>
+                      <input
+                        type='number'
+                        min='0'
+                        max='100'
+                        className='w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-green-500 transition-all duration-200 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100'
+                        value={continueWatchingMaxProgress}
+                        onChange={(e) => {
+                          const value = Math.max(0, Math.min(100, parseInt(e.target.value) || 100));
+                          handleContinueWatchingMaxProgressChange(value);
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* 当前范围提示 */}
+                  <div className='text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 p-3 rounded-lg'>
+                    当前设置：显示播放进度在 {continueWatchingMinProgress}% - {continueWatchingMaxProgress}% 之间的内容
+                  </div>
+                </>
+              )}
+
+              {/* 关闭筛选时的提示 */}
+              {!enableContinueWatchingFilter && (
+                <div className='text-xs text-gray-500 dark:text-gray-400 bg-orange-50 dark:bg-orange-900/20 p-3 rounded-lg border border-orange-200 dark:border-orange-800'>
+                  筛选已关闭：将显示所有播放时间超过2分钟的内容
+                </div>
+              )}
+            </div>
+
+            {/* 分割线 */}
+            <div className='border-t border-gray-200 dark:border-gray-700'></div>
+
+            {/* 下载格式设置 */}
+            <div className='space-y-3'>
+              <div>
+                <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300'>
+                  下载格式
+                </h4>
+                <p className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                  选择视频下载时的默认格式
+                </p>
+              </div>
+
+              {/* 格式选择 */}
+              <div className='grid grid-cols-2 gap-3'>
+                <button
+                  type='button'
+                  onClick={() => handleDownloadFormatChange('TS')}
+                  className={`p-4 rounded-lg border-2 transition-all duration-200 ${
+                    downloadFormat === 'TS'
+                      ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                      : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
+                  }`}
+                >
+                  <div className='flex flex-col items-center gap-2'>
+                    <div className={`text-2xl ${downloadFormat === 'TS' ? 'text-green-600 dark:text-green-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                      📦
+                    </div>
+                    <div className='text-center'>
+                      <div className={`text-sm font-semibold ${downloadFormat === 'TS' ? 'text-green-700 dark:text-green-300' : 'text-gray-900 dark:text-gray-100'}`}>
+                        TS格式
+                      </div>
+                      <div className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                        推荐，兼容性好
+                      </div>
+                    </div>
+                    {downloadFormat === 'TS' && (
+                      <div className='w-5 h-5 rounded-full bg-green-500 text-white flex items-center justify-center'>
+                        <svg className='w-3 h-3' fill='currentColor' viewBox='0 0 20 20'>
+                          <path fillRule='evenodd' d='M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z' clipRule='evenodd' />
+                        </svg>
+                      </div>
+                    )}
+                  </div>
+                </button>
+
+                <button
+                  type='button'
+                  onClick={() => handleDownloadFormatChange('MP4')}
+                  className={`p-4 rounded-lg border-2 transition-all duration-200 ${
+                    downloadFormat === 'MP4'
+                      ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                      : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
+                  }`}
+                >
+                  <div className='flex flex-col items-center gap-2'>
+                    <div className={`text-2xl ${downloadFormat === 'MP4' ? 'text-blue-600 dark:text-blue-400' : 'text-gray-500 dark:text-gray-400'}`}>
+                      🎬
+                    </div>
+                    <div className='text-center'>
+                      <div className={`text-sm font-semibold ${downloadFormat === 'MP4' ? 'text-blue-700 dark:text-blue-300' : 'text-gray-900 dark:text-gray-100'}`}>
+                        MP4格式
+                      </div>
+                      <div className='text-xs text-gray-500 dark:text-gray-400 mt-1'>
+                        通用格式
+                      </div>
+                    </div>
+                    {downloadFormat === 'MP4' && (
+                      <div className='w-5 h-5 rounded-full bg-blue-500 text-white flex items-center justify-center'>
+                        <svg className='w-3 h-3' fill='currentColor' viewBox='0 0 20 20'>
+                          <path fillRule='evenodd' d='M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z' clipRule='evenodd' />
+                        </svg>
+                      </div>
+                    )}
+                  </div>
+                </button>
+              </div>
+
+              {/* 格式说明 */}
+              <div className='text-xs text-gray-500 dark:text-gray-400 bg-blue-50 dark:bg-blue-900/20 p-3 rounded-lg border border-blue-200 dark:border-blue-800'>
+                💡 TS格式下载速度快，兼容性好；MP4格式经过转码，体积略小，兼容性更广
+              </div>
+            </div>
           </div>
 
           {/* 底部说明 */}
@@ -972,7 +1934,7 @@ export const UserMenu: React.FC = () => {
     <>
       {/* 背景遮罩 */}
       <div
-        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-[1000]'
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-1000'
         onClick={handleCloseChangePassword}
         onTouchMove={(e) => {
           // 只阻止滚动，允许其他触摸事件
@@ -989,7 +1951,7 @@ export const UserMenu: React.FC = () => {
 
       {/* 修改密码面板 */}
       <div
-        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white dark:bg-gray-900 rounded-xl shadow-xl z-[1001] overflow-hidden'
+        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-md bg-white dark:bg-gray-900 rounded-xl shadow-xl z-1001 overflow-hidden'
       >
         {/* 内容容器 - 独立的滚动区域 */}
         <div
@@ -1086,18 +2048,379 @@ export const UserMenu: React.FC = () => {
     </>
   );
 
+  // 更新剧集海报弹窗内容
+  const watchingUpdatesPanel = (
+    <>
+      {/* 背景遮罩 */}
+      <div
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-1000'
+        onClick={handleCloseWatchingUpdates}
+        onTouchMove={(e) => {
+          e.preventDefault();
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+        }}
+        style={{
+          touchAction: 'none',
+        }}
+      />
+
+      {/* 更新弹窗 */}
+      <div
+        className='fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-4xl max-h-[90vh] bg-white dark:bg-gray-900 rounded-xl shadow-xl z-1001 flex flex-col'
+      >
+        {/* 内容容器 - 独立的滚动区域 */}
+        <div
+          className='flex-1 p-6 overflow-y-auto'
+          data-panel-content
+          style={{
+            touchAction: 'pan-y',
+            overscrollBehavior: 'contain',
+          }}
+        >
+          {/* 标题栏 */}
+          <div className='flex items-center justify-between mb-6'>
+            <div className='flex items-center gap-3'>
+              <h3 className='text-xl font-bold text-gray-800 dark:text-gray-200'>
+                更新提醒
+              </h3>
+              <div className='flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400'>
+                {watchingUpdates && watchingUpdates.updatedCount > 0 && (
+                  <span className='inline-flex items-center gap-1'>
+                    <div className='w-2 h-2 bg-red-500 rounded-full animate-pulse'></div>
+                    {watchingUpdates.updatedCount}部有新集
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={handleCloseWatchingUpdates}
+              className='w-8 h-8 p-1 rounded-full flex items-center justify-center text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors'
+              aria-label='Close'
+            >
+              <X className='w-full h-full' />
+            </button>
+          </div>
+
+          {/* 更新列表 */}
+          <div className='space-y-8'>
+            {/* 没有更新时的提示 */}
+            {!hasActualUpdates && (
+              <div className='text-center py-8'>
+                <div className='text-gray-500 dark:text-gray-400 text-sm'>
+                  暂无新剧集更新
+                </div>
+                <div className='text-xs text-gray-400 dark:text-gray-500 mt-2'>
+                  系统会定期检查您观看过的剧集是否有新集数更新
+                </div>
+              </div>
+            )}
+            {/* 有新集数的剧集 */}
+            {watchingUpdates && watchingUpdates.updatedSeries.filter(series => series.hasNewEpisode).length > 0 && (
+              <div>
+                <div className='flex items-center gap-2 mb-4'>
+                  <h4 className='text-lg font-semibold text-gray-900 dark:text-white'>
+                    新集更新
+                  </h4>
+                  <div className='flex items-center gap-1'>
+                    <div className='w-2 h-2 bg-red-500 rounded-full animate-pulse'></div>
+                    <span className='text-sm text-red-500 font-medium'>
+                      {watchingUpdates.updatedSeries.filter(series => series.hasNewEpisode).length}部剧集有更新
+                    </span>
+                  </div>
+                </div>
+
+                <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'>
+                  {watchingUpdates.updatedSeries
+                    .filter(series => series.hasNewEpisode)
+                    .map((series, index) => (
+                      <div key={`new-${series.title}_${series.year}_${index}`} className='relative group/card'>
+                        <div className='relative group-hover/card:z-5 transition-all duration-300'>
+                          <VideoCard
+                            title={series.title}
+                            poster={series.cover}
+                            year={series.year}
+                            source={series.sourceKey}
+                            source_name={series.source_name}
+                            episodes={series.totalEpisodes}
+                            currentEpisode={series.currentEpisode}
+                            id={series.videoId}
+                            onDelete={undefined}
+                            type={series.totalEpisodes > 1 ? 'tv' : ''}
+                            from="playrecord"
+                          />
+                        </div>
+                        {/* 新集数徽章 - Netflix 统一风格 */}
+                        <div className='absolute -top-2 -right-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold'>
+                          +{series.newEpisodes}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+          </div>
+
+          {/* 底部说明 */}
+          <div className='mt-6 pt-4 border-t border-gray-200 dark:border-gray-700'>
+            <p className='text-xs text-gray-500 dark:text-gray-400 text-center'>
+              点击海报即可观看新更新的剧集
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  // 继续观看弹窗内容
+  const continueWatchingPanel = (
+    <>
+      {/* 背景遮罩 */}
+      <div
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-1000'
+        onClick={handleCloseContinueWatching}
+        onTouchMove={(e) => {
+          e.preventDefault();
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+        }}
+        style={{
+          touchAction: 'none',
+        }}
+      />
+
+      {/* 继续观看弹窗 */}
+      <div
+        className='fixed inset-x-4 top-1/2 transform -translate-y-1/2 max-w-4xl mx-auto bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 z-1001 max-h-[80vh] overflow-y-auto'
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className='p-6'>
+          <div className='flex items-center justify-between mb-4'>
+            <h3 className='text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2'>
+              <PlayCircle className='w-6 h-6 text-blue-500' />
+              继续观看
+            </h3>
+            <button
+              onClick={handleCloseContinueWatching}
+              className='p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors'
+            >
+              <X className='w-5 h-5' />
+            </button>
+          </div>
+
+          {/* 播放记录网格 */}
+          <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'>
+            {playRecords.map((record) => {
+              const { source, id } = parseKey(record.key);
+              const newEpisodesCount = getNewEpisodesCount(record);
+              return (
+                <div key={record.key} className='relative group/card'>
+                  <div className='relative group-hover/card:z-5 transition-all duration-300'>
+                    <VideoCard
+                      id={id}
+                      title={record.title}
+                      poster={record.cover}
+                      year={record.year}
+                      source={source}
+                      source_name={record.source_name}
+                      progress={getProgress(record)}
+                      episodes={record.total_episodes}
+                      currentEpisode={record.index}
+                      query={record.search_title}
+                      from='playrecord'
+                      type={record.total_episodes > 1 ? 'tv' : ''}
+                      remarks={record.remarks}
+                    />
+                  </div>
+                  {/* 新集数徽章 - Netflix 统一风格 */}
+                  {newEpisodesCount > 0 && (
+                    <div className='absolute -top-2 -right-2 bg-red-600 text-white text-xs px-2 py-0.5 rounded-md shadow-lg animate-pulse z-10 font-bold'>
+                      +{newEpisodesCount}
+                    </div>
+                  )}
+                  {/* 进度指示器 */}
+                  {getProgress(record) > 0 && (
+                    <div className='absolute bottom-2 left-2 right-2 bg-black/50 rounded px-2 py-1'>
+                      <div className='flex items-center gap-1'>
+                        <div className='flex-1 bg-gray-600 rounded-full h-1'>
+                          <div
+                            className='bg-blue-500 h-1 rounded-full transition-all'
+                            style={{ width: `${Math.min(getProgress(record), 100)}%` }}
+                          />
+                        </div>
+                        <span className='text-xs text-white font-medium'>
+                          {Math.round(getProgress(record))}%
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 空状态 */}
+          {playRecords.length === 0 && (
+            <div className='text-center py-12'>
+              <PlayCircle className='w-16 h-16 text-gray-300 dark:text-gray-600 mx-auto mb-4' />
+              <p className='text-gray-500 dark:text-gray-400 mb-2'>暂无需要继续观看的内容</p>
+              <p className='text-xs text-gray-400 dark:text-gray-500'>
+                {enableContinueWatchingFilter
+                  ? `观看进度在${continueWatchingMinProgress}%-${continueWatchingMaxProgress}%之间且播放时间超过2分钟的内容会显示在这里`
+                  : '播放时间超过2分钟的所有内容都会显示在这里'
+                }
+              </p>
+            </div>
+          )}
+
+          {/* 底部说明 */}
+          <div className='mt-6 pt-4 border-t border-gray-200 dark:border-gray-700'>
+            <p className='text-xs text-gray-500 dark:text-gray-400 text-center'>
+              点击海报即可继续观看
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  // 我的收藏弹窗内容
+  const favoritesPanel = (
+    <>
+      {/* 背景遮罩 */}
+      <div
+        className='fixed inset-0 bg-black/50 backdrop-blur-sm z-1000'
+        onClick={handleCloseFavorites}
+        onTouchMove={(e) => {
+          e.preventDefault();
+        }}
+        onWheel={(e) => {
+          e.preventDefault();
+        }}
+        style={{
+          touchAction: 'none',
+        }}
+      />
+
+      {/* 收藏弹窗 */}
+      <div
+        className='fixed inset-x-4 top-1/2 transform -translate-y-1/2 max-w-4xl mx-auto bg-white dark:bg-gray-900 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 z-1001 max-h-[80vh] overflow-y-auto'
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className='p-6'>
+          <div className='flex items-center justify-between mb-4'>
+            <h3 className='text-xl font-bold text-gray-900 dark:text-white flex items-center gap-2'>
+              <Heart className='w-6 h-6 text-red-500' />
+              我的收藏
+            </h3>
+            <button
+              onClick={handleCloseFavorites}
+              className='p-2 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 transition-colors'
+            >
+              <X className='w-5 h-5' />
+            </button>
+          </div>
+
+          {/* 收藏网格 */}
+          <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'>
+            {favorites.map((favorite) => {
+              const { source, id } = parseKey(favorite.key);
+
+              // 智能计算即将上映状态
+              let calculatedRemarks = favorite.remarks;
+              let isNewRelease = false;
+
+              if (favorite.releaseDate) {
+                const today = new Date();
+                today.setHours(0, 0, 0, 0);
+                const releaseDate = new Date(favorite.releaseDate);
+                const daysDiff = Math.ceil((releaseDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+                // 根据天数差异动态更新显示文字
+                if (daysDiff < 0) {
+                  const daysAgo = Math.abs(daysDiff);
+                  calculatedRemarks = `已上映${daysAgo}天`;
+                  // 7天内上映的标记为新上映
+                  if (daysAgo <= 7) {
+                    isNewRelease = true;
+                  }
+                } else if (daysDiff === 0) {
+                  calculatedRemarks = '今日上映';
+                  isNewRelease = true;
+                } else {
+                  calculatedRemarks = `${daysDiff}天后上映`;
+                }
+              }
+
+              return (
+                <div key={favorite.key} className='relative'>
+                  <VideoCard
+                    id={id}
+                    title={favorite.title}
+                    poster={favorite.cover}
+                    year={favorite.year}
+                    source={source}
+                    source_name={favorite.source_name}
+                    episodes={favorite.total_episodes}
+                    query={favorite.search_title}
+                    from='favorite'
+                    type={favorite.total_episodes > 1 ? 'tv' : ''}
+                    remarks={calculatedRemarks}
+                    releaseDate={favorite.releaseDate}
+                  />
+                  {/* 收藏心形图标 - 隐藏，使用VideoCard内部的hover爱心 */}
+                  {/* 新上映高亮标记 - Netflix 统一风格 - 7天内上映的显示 */}
+                  {isNewRelease && (
+                    <div className='absolute top-2 left-2 bg-orange-500 text-white text-xs font-bold px-3 py-1 rounded-md shadow-lg animate-pulse z-40'>
+                      新上映
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 空状态 */}
+          {favorites.length === 0 && (
+            <div className='text-center py-12'>
+              <Heart className='w-16 h-16 text-gray-300 dark:text-gray-600 mx-auto mb-4' />
+              <p className='text-gray-500 dark:text-gray-400 mb-2'>暂无收藏</p>
+              <p className='text-xs text-gray-400 dark:text-gray-500'>
+                在详情页点击收藏按钮即可添加收藏
+              </p>
+            </div>
+          )}
+
+          {/* 底部说明 */}
+          <div className='mt-6 pt-4 border-t border-gray-200 dark:border-gray-700'>
+            <p className='text-xs text-gray-500 dark:text-gray-400 text-center'>
+              点击海报即可进入详情页面
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
   return (
     <>
       <div className='relative'>
         <button
           onClick={handleMenuClick}
-          className='w-10 h-10 p-2 rounded-full flex items-center justify-center text-gray-600 hover:bg-gray-200/50 dark:text-gray-300 dark:hover:bg-gray-700/50 transition-colors'
+          className='relative w-10 h-10 p-2 rounded-full flex items-center justify-center text-gray-600 hover:text-blue-500 dark:text-gray-300 dark:hover:text-blue-400 transition-all duration-300 hover:scale-110 hover:shadow-lg hover:shadow-blue-500/30 dark:hover:shadow-blue-400/30 group'
           aria-label='User Menu'
         >
-          <User className='w-full h-full' />
+          {/* 微光背景效果 */}
+          <div className='absolute inset-0 rounded-full bg-linear-to-br from-blue-400/0 to-purple-600/0 group-hover:from-blue-400/20 group-hover:to-purple-600/20 dark:group-hover:from-blue-300/20 dark:group-hover:to-purple-500/20 transition-all duration-300'></div>
+
+          <User className='w-full h-full relative z-10 group-hover:scale-110 transition-transform duration-300' />
         </button>
-        {updateStatus === UpdateStatus.HAS_UPDATE && (
-          <div className='absolute top-[2px] right-[2px] w-2 h-2 bg-yellow-500 rounded-full'></div>
+        {/* 统一更新提醒点：版本更新或剧集更新都显示橙色点 */}
+        {((updateStatus === UpdateStatus.HAS_UPDATE) || (hasUnreadUpdates && totalUpdates > 0)) && (
+          <div className='absolute top-[2px] right-[2px] w-2 h-2 bg-yellow-500 rounded-full animate-pulse shadow-lg shadow-yellow-500/50'></div>
         )}
       </div>
 
@@ -1111,6 +2434,21 @@ export const UserMenu: React.FC = () => {
       {isChangePasswordOpen &&
         mounted &&
         createPortal(changePasswordPanel, document.body)}
+
+      {/* 使用 Portal 将更新提醒面板渲染到 document.body */}
+      {isWatchingUpdatesOpen &&
+        mounted &&
+        createPortal(watchingUpdatesPanel, document.body)}
+
+      {/* 使用 Portal 将继续观看面板渲染到 document.body */}
+      {isContinueWatchingOpen &&
+        mounted &&
+        createPortal(continueWatchingPanel, document.body)}
+
+      {/* 使用 Portal 将我的收藏面板渲染到 document.body */}
+      {isFavoritesOpen &&
+        mounted &&
+        createPortal(favoritesPanel, document.body)}
 
       {/* 版本面板 */}
       <VersionPanel

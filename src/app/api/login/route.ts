@@ -62,6 +62,7 @@ async function generateAuthCookie(
     const signature = await generateSignature(username, process.env.PASSWORD);
     authData.signature = signature;
     authData.timestamp = Date.now(); // 添加时间戳防重放攻击
+    authData.loginTime = Date.now(); // 添加登入时间记录
   }
 
   return encodeURIComponent(JSON.stringify(authData));
@@ -78,7 +79,7 @@ export async function POST(req: NextRequest) {
         const response = NextResponse.json({ ok: true });
 
         // 清除可能存在的认证cookie
-        response.cookies.set('auth', '', {
+        response.cookies.set('user_auth', '', {
           path: '/',
           expires: new Date(0),
           sameSite: 'lax', // 改为 lax 以支持 PWA
@@ -112,7 +113,7 @@ export async function POST(req: NextRequest) {
       const expires = new Date();
       expires.setDate(expires.getDate() + 7); // 7天过期
 
-      response.cookies.set('auth', cookieValue, {
+      response.cookies.set('user_auth', cookieValue, {
         path: '/',
         expires,
         sameSite: 'lax', // 改为 lax 以支持 PWA
@@ -149,7 +150,7 @@ export async function POST(req: NextRequest) {
       const expires = new Date();
       expires.setDate(expires.getDate() + 7); // 7天过期
 
-      response.cookies.set('auth', cookieValue, {
+      response.cookies.set('user_auth', cookieValue, {
         path: '/',
         expires,
         sameSite: 'lax', // 改为 lax 以支持 PWA
@@ -168,9 +169,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '用户被封禁' }, { status: 401 });
     }
 
-    // 校验用户密码
+    // 校验用户密码（V1）
     try {
       const pass = await db.verifyUser(username, password);
+
       if (!pass) {
         return NextResponse.json(
           { error: '用户名或密码错误' },
@@ -185,16 +187,16 @@ export async function POST(req: NextRequest) {
         password,
         user?.role || 'user',
         false
-      ); // 数据库模式不包含 password
+      );
       const expires = new Date();
       expires.setDate(expires.getDate() + 7); // 7天过期
 
-      response.cookies.set('auth', cookieValue, {
+      response.cookies.set('user_auth', cookieValue, {
         path: '/',
         expires,
-        sameSite: 'lax', // 改为 lax 以支持 PWA
-        httpOnly: false, // PWA 需要客户端可访问
-        secure: false, // 根据协议自动设置
+        sameSite: 'lax',
+        httpOnly: false,
+        secure: false,
       });
 
       return response;

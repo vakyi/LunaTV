@@ -8,8 +8,13 @@ import './globals.css';
 import { getConfig } from '@/lib/config';
 
 import { GlobalErrorIndicator } from '../components/GlobalErrorIndicator';
+import { SessionTracker } from '../components/SessionTracker';
 import { SiteProvider } from '../components/SiteProvider';
 import { ThemeProvider } from '../components/ThemeProvider';
+import { WatchRoomProvider } from '../components/WatchRoomProvider';
+import { DownloadProvider } from '../contexts/DownloadContext';
+import { DownloadPanel } from '../components/download/DownloadPanel';
+import ChatFloatingWindow from '../components/watch-room/ChatFloatingWindow';
 
 const inter = Inter({ subsets: ['latin'] });
 export const dynamic = 'force-dynamic';
@@ -49,7 +54,7 @@ export default async function RootLayout({
   let doubanProxyType = process.env.NEXT_PUBLIC_DOUBAN_PROXY_TYPE || 'direct';
   let doubanProxy = process.env.NEXT_PUBLIC_DOUBAN_PROXY || '';
   let doubanImageProxyType =
-    process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY_TYPE || 'direct';
+    process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY_TYPE || 'server';
   let doubanImageProxy = process.env.NEXT_PUBLIC_DOUBAN_IMAGE_PROXY || '';
   let disableYellowFilter =
     process.env.NEXT_PUBLIC_DISABLE_YELLOW_FILTER === 'true';
@@ -116,10 +121,17 @@ export default async function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <SiteProvider siteName={siteName} announcement={announcement}>
-            {children}
-            <GlobalErrorIndicator />
-          </SiteProvider>
+          <DownloadProvider>
+            <WatchRoomProvider>
+              <SiteProvider siteName={siteName} announcement={announcement}>
+                <SessionTracker />
+                {children}
+                <GlobalErrorIndicator />
+              </SiteProvider>
+              <DownloadPanel />
+              <ChatFloatingWindow />
+            </WatchRoomProvider>
+          </DownloadProvider>
         </ThemeProvider>
       </body>
     </html>

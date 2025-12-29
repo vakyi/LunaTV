@@ -3,7 +3,15 @@
 import { AdminConfig } from './admin.types';
 import { KvrocksStorage } from './kvrocks.db';
 import { RedisStorage } from './redis.db';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import {
+  ContentStat,
+  EpisodeSkipConfig,
+  Favorite,
+  IStorage,
+  PlayRecord,
+  PlayStatsResult,
+  UserPlayStat,
+} from './types';
 import { UpstashRedisStorage } from './upstash.db';
 
 // storage type 常量: 'localstorage' | 'redis' | 'upstash'，默认 'localstorage'
@@ -154,6 +162,56 @@ export class DbManager {
     await this.storage.deleteUser(userName);
   }
 
+  // ---------- 用户相关（新版本 V2，支持 OIDC） ----------
+  async createUserV2(
+    userName: string,
+    password: string,
+    role: 'owner' | 'admin' | 'user' = 'user',
+    tags?: string[],
+    oidcSub?: string,
+    enabledApis?: string[]
+  ): Promise<void> {
+    if (typeof (this.storage as any).createUserV2 === 'function') {
+      await (this.storage as any).createUserV2(userName, password, role, tags, oidcSub, enabledApis);
+    }
+  }
+
+  async verifyUserV2(userName: string, password: string): Promise<boolean> {
+    if (typeof (this.storage as any).verifyUserV2 === 'function') {
+      return (this.storage as any).verifyUserV2(userName, password);
+    }
+    return false;
+  }
+
+  async checkUserExistV2(userName: string): Promise<boolean> {
+    if (typeof (this.storage as any).checkUserExistV2 === 'function') {
+      return (this.storage as any).checkUserExistV2(userName);
+    }
+    return false;
+  }
+
+  async getUserByOidcSub(oidcSub: string): Promise<string | null> {
+    if (typeof (this.storage as any).getUserByOidcSub === 'function') {
+      return (this.storage as any).getUserByOidcSub(oidcSub);
+    }
+    return null;
+  }
+
+  async getUserInfoV2(userName: string): Promise<{
+    username: string;
+    role: 'owner' | 'admin' | 'user';
+    tags?: string[];
+    enabledApis?: string[];
+    banned?: boolean;
+    createdAt?: number;
+    oidcSub?: string;
+  } | null> {
+    if (typeof (this.storage as any).getUserInfoV2 === 'function') {
+      return (this.storage as any).getUserInfoV2(userName);
+    }
+    return null;
+  }
+
   // ---------- 搜索历史 ----------
   async getSearchHistory(userName: string): Promise<string[]> {
     return this.storage.getSearchHistory(userName);
@@ -194,7 +252,7 @@ export class DbManager {
     userName: string,
     source: string,
     id: string
-  ): Promise<SkipConfig | null> {
+  ): Promise<EpisodeSkipConfig | null> {
     if (typeof (this.storage as any).getSkipConfig === 'function') {
       return (this.storage as any).getSkipConfig(userName, source, id);
     }
@@ -205,7 +263,7 @@ export class DbManager {
     userName: string,
     source: string,
     id: string,
-    config: SkipConfig
+    config: EpisodeSkipConfig
   ): Promise<void> {
     if (typeof (this.storage as any).setSkipConfig === 'function') {
       await (this.storage as any).setSkipConfig(userName, source, id, config);
@@ -224,9 +282,51 @@ export class DbManager {
 
   async getAllSkipConfigs(
     userName: string
-  ): Promise<{ [key: string]: SkipConfig }> {
+  ): Promise<{ [key: string]: EpisodeSkipConfig }> {
     if (typeof (this.storage as any).getAllSkipConfigs === 'function') {
       return (this.storage as any).getAllSkipConfigs(userName);
+    }
+    return {};
+  }
+
+  // ---------- 剧集跳过配置（新版，多片段支持）----------
+  async getEpisodeSkipConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<EpisodeSkipConfig | null> {
+    if (typeof (this.storage as any).getEpisodeSkipConfig === 'function') {
+      return (this.storage as any).getEpisodeSkipConfig(userName, source, id);
+    }
+    return null;
+  }
+
+  async saveEpisodeSkipConfig(
+    userName: string,
+    source: string,
+    id: string,
+    config: EpisodeSkipConfig
+  ): Promise<void> {
+    if (typeof (this.storage as any).saveEpisodeSkipConfig === 'function') {
+      await (this.storage as any).saveEpisodeSkipConfig(userName, source, id, config);
+    }
+  }
+
+  async deleteEpisodeSkipConfig(
+    userName: string,
+    source: string,
+    id: string
+  ): Promise<void> {
+    if (typeof (this.storage as any).deleteEpisodeSkipConfig === 'function') {
+      await (this.storage as any).deleteEpisodeSkipConfig(userName, source, id);
+    }
+  }
+
+  async getAllEpisodeSkipConfigs(
+    userName: string
+  ): Promise<{ [key: string]: EpisodeSkipConfig }> {
+    if (typeof (this.storage as any).getAllEpisodeSkipConfigs === 'function') {
+      return (this.storage as any).getAllEpisodeSkipConfigs(userName);
     }
     return {};
   }
@@ -264,6 +364,97 @@ export class DbManager {
     if (typeof this.storage.clearExpiredCache === 'function') {
       await this.storage.clearExpiredCache(prefix);
     }
+  }
+
+  // ---------- 播放统计相关 ----------
+  async getPlayStats(): Promise<PlayStatsResult> {
+    if (typeof (this.storage as any).getPlayStats === 'function') {
+      return (this.storage as any).getPlayStats();
+    }
+
+    // 如果存储不支持统计功能，返回默认值
+    return {
+      totalUsers: 0,
+      totalWatchTime: 0,
+      totalPlays: 0,
+      avgWatchTimePerUser: 0,
+      avgPlaysPerUser: 0,
+      userStats: [],
+      topSources: [],
+      dailyStats: [],
+      // 新增：用户注册统计
+      registrationStats: {
+        todayNewUsers: 0,
+        totalRegisteredUsers: 0,
+        registrationTrend: [],
+      },
+      // 新增：用户活跃度统计
+      activeUsers: {
+        daily: 0,
+        weekly: 0,
+        monthly: 0,
+      },
+    };
+  }
+
+  async getUserPlayStat(userName: string): Promise<UserPlayStat> {
+    if (typeof (this.storage as any).getUserPlayStat === 'function') {
+      return (this.storage as any).getUserPlayStat(userName);
+    }
+
+    // 如果存储不支持统计功能，返回默认值
+    return {
+      username: userName,
+      totalWatchTime: 0,
+      totalPlays: 0,
+      lastPlayTime: 0,
+      recentRecords: [],
+      avgWatchTime: 0,
+      mostWatchedSource: ''
+    };
+  }
+
+  async getContentStats(limit = 10): Promise<ContentStat[]> {
+    if (typeof (this.storage as any).getContentStats === 'function') {
+      return (this.storage as any).getContentStats(limit);
+    }
+
+    // 如果存储不支持统计功能，返回空数组
+    return [];
+  }
+
+  async updatePlayStatistics(
+    _userName: string,
+    _source: string,
+    _id: string,
+    _watchTime: number
+  ): Promise<void> {
+    if (typeof (this.storage as any).updatePlayStatistics === 'function') {
+      await (this.storage as any).updatePlayStatistics(_userName, _source, _id, _watchTime);
+    }
+  }
+
+  async updateUserLoginStats(
+    userName: string,
+    loginTime: number,
+    isFirstLogin?: boolean
+  ): Promise<void> {
+    if (typeof (this.storage as any).updateUserLoginStats === 'function') {
+      await (this.storage as any).updateUserLoginStats(userName, loginTime, isFirstLogin);
+    }
+  }
+
+  // 删除 V1 用户密码数据（用于 V1→V2 迁移）
+  async deleteV1Password(userName: string): Promise<void> {
+    if (typeof (this.storage as any).client !== 'undefined') {
+      await (this.storage as any).client.del(`u:${userName}:pwd`);
+    }
+  }
+
+  // 检查存储类型是否支持统计功能
+  isStatsSupported(): boolean {
+    const storageType = process.env.NEXT_PUBLIC_STORAGE_TYPE || 'localstorage';
+    return storageType !== 'localstorage';
   }
 }
 

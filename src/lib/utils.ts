@@ -1,13 +1,83 @@
+import { clsx, type ClassValue } from 'clsx';
 import he from 'he';
 import Hls from 'hls.js';
+import { twMerge } from 'tailwind-merge';
 
-// 使用ArtPlayer的兼容性检测函数
-// 参考: ArtPlayer-master/packages/artplayer/src/utils/compatibility.js
+/**
+ * Utility function for merging Tailwind CSS classes
+ * Combines clsx and tailwind-merge for optimal class handling
+ *
+ * @example
+ * cn('px-2 py-1', condition && 'bg-blue-500')
+ * cn('px-2', 'px-4') // => 'px-4' (tailwind-merge handles conflicts)
+ */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+// 增强的设备检测逻辑，参考最新的设备特征
 const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+
+// iOS 设备检测 (包括 iPad 的新版本检测)
 const isIOS = /iPad|iPhone|iPod/i.test(userAgent) && !(window as any).MSStream;
-const isIOS13 = isIOS || (userAgent.includes('Macintosh') && navigator.maxTouchPoints >= 1);
-const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent) || isIOS13;
-const isSafari = /^(?:(?!chrome|android).)*safari/i.test(userAgent);
+const isIOS13Plus = isIOS || (
+  userAgent.includes('Macintosh') && 
+  typeof navigator !== 'undefined' && 
+  navigator.maxTouchPoints >= 1
+);
+
+// iPad 专门检测 (包括新的 iPad Pro)
+const isIPad = /iPad/i.test(userAgent) || (
+  userAgent.includes('Macintosh') && 
+  typeof navigator !== 'undefined' && 
+  navigator.maxTouchPoints > 2
+);
+
+// Android 设备检测
+const isAndroid = /Android/i.test(userAgent);
+
+// 移动设备检测 (更精确的判断)
+const isMobile = isIOS13Plus || isAndroid || /webOS|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+
+// 平板设备检测
+const isTablet = isIPad || (isAndroid && !/Mobile/i.test(userAgent)) || 
+  (typeof screen !== 'undefined' && screen.width >= 768);
+
+// Safari 浏览器检测 (更精确)
+const isSafari = /^(?:(?!chrome|android).)*safari/i.test(userAgent) && !isAndroid;
+
+// WebKit 检测
+const isWebKit = /WebKit/i.test(userAgent);
+
+// 设备性能等级估算
+const getDevicePerformanceLevel = (): 'low' | 'medium' | 'high' => {
+  if (typeof navigator === 'undefined') return 'medium';
+  
+  // 基于硬件并发数判断
+  const cores = navigator.hardwareConcurrency || 4;
+  
+  if (isMobile) {
+    return cores >= 6 ? 'medium' : 'low';
+  } else {
+    return cores >= 8 ? 'high' : cores >= 4 ? 'medium' : 'low';
+  }
+};
+
+const devicePerformance = getDevicePerformanceLevel();
+
+// 导出设备检测结果供其他模块使用
+export {
+  isIOS,
+  isIOS13Plus,
+  isIPad,
+  isAndroid,
+  isMobile,
+  isTablet,
+  isSafari,
+  isWebKit,
+  devicePerformance,
+  getDevicePerformanceLevel
+};
 
 function getDoubanImageProxyConfig(): {
   proxyType:
@@ -19,14 +89,31 @@ function getDoubanImageProxyConfig(): {
   | 'custom';
   proxyUrl: string;
 } {
-  const doubanImageProxyType =
-    localStorage.getItem('doubanImageProxyType') ||
-    (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY_TYPE ||
-    'cmliussss-cdn-tencent';
-  const doubanImageProxy =
-    localStorage.getItem('doubanImageProxyUrl') ||
-    (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY ||
-    '';
+  // 安全地访问 localStorage（避免服务端渲染报错）
+  let doubanImageProxyType: 'direct' | 'server' | 'img3' | 'cmliussss-cdn-tencent' | 'cmliussss-cdn-ali' | 'custom' = 'server'; // 默认值
+  let doubanImageProxy = '';
+
+  if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
+    const storedType = localStorage.getItem('doubanImageProxyType');
+    const runtimeType = (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY_TYPE;
+
+    // 自动修复：如果localStorage或RUNTIME_CONFIG是'direct'，自动改为'server'
+    let effectiveStoredType = storedType;
+    if (storedType === 'direct') {
+      effectiveStoredType = 'server';
+      // 自动更新localStorage，避免下次还是'direct'
+      localStorage.setItem('doubanImageProxyType', 'server');
+    }
+
+    const effectiveRuntimeType = (runtimeType === 'direct') ? 'server' : runtimeType;
+
+    doubanImageProxyType = (effectiveStoredType || effectiveRuntimeType || 'server') as 'direct' | 'server' | 'img3' | 'cmliussss-cdn-tencent' | 'cmliussss-cdn-ali' | 'custom';
+    doubanImageProxy =
+      localStorage.getItem('doubanImageProxyUrl') ||
+      (window as any).RUNTIME_CONFIG?.DOUBAN_IMAGE_PROXY ||
+      '';
+  }
+
   return {
     proxyType: doubanImageProxyType,
     proxyUrl: doubanImageProxy,
@@ -38,6 +125,11 @@ function getDoubanImageProxyConfig(): {
  */
 export function processImageUrl(originalUrl: string): string {
   if (!originalUrl) return originalUrl;
+
+  // 处理 manmankan 图片防盗链
+  if (originalUrl.includes('manmankan.com')) {
+    return `/api/image-proxy?url=${encodeURIComponent(originalUrl)}`;
+  }
 
   // 仅处理豆瓣图片代理
   if (!originalUrl.includes('doubanio.com')) {
@@ -120,6 +212,8 @@ export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
         video.width = 32;
         video.height = 18;
         video.style.display = 'none';
+        video.style.position = 'absolute';
+        video.style.left = '-9999px';
       }
 
       // 测量ping时间
@@ -134,15 +228,63 @@ export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
           pingTime = performance.now() - pingStart;
         });
 
-      // 移动设备使用更保守的HLS配置
-      const hls = new Hls({
+      // 基于最新 hls.js v1.6.13 和设备性能的智能优化配置
+      const hlsConfig = {
         debug: false,
-        enableWorker: false, // 移动设备关闭WebWorker减少内存占用
-        lowLatencyMode: false,
-        maxBufferLength: isMobile ? 2 : 10,
-        maxBufferSize: isMobile ? 1024 * 1024 : 5 * 1024 * 1024,
-        backBufferLength: 0,
-      });
+
+        // Worker 配置 - 根据设备性能和浏览器能力
+        enableWorker: !isMobile && !isSafari && devicePerformance !== 'low',
+
+        // 低延迟模式 - 仅在高性能非移动设备上启用
+        lowLatencyMode: !isMobile && devicePerformance === 'high',
+
+        // v1.6.13 新增：优化片段解析错误处理
+        fragLoadingRetryDelay: isMobile ? 500 : 300,
+        fragLoadingMaxRetry: 3,
+
+        // v1.6.13 新增：时间戳处理优化（针对直播回搜修复）
+        allowAugmentingTimeStamp: true,
+
+        // 缓冲管理 - 基于设备性能分级
+        maxBufferLength: devicePerformance === 'low' ? 3 :
+                        devicePerformance === 'medium' ? 8 : 15,
+        maxBufferSize: devicePerformance === 'low' ? 1 * 1024 * 1024 :
+                      devicePerformance === 'medium' ? 5 * 1024 * 1024 : 15 * 1024 * 1024,
+        backBufferLength: isTablet ? 20 : isMobile ? 10 : 30,
+        frontBufferFlushThreshold: devicePerformance === 'low' ? 15 :
+                                  devicePerformance === 'medium' ? 30 : 60,
+
+        // v1.6.13 增强：更智能的缓冲区管理
+        maxBufferHole: 0.3, // 允许较小的缓冲区空洞
+        appendErrorMaxRetry: 5, // 增加append错误重试次数以利用v1.6.13修复
+
+        // 自适应比特率 - 根据设备类型和性能调整
+        abrEwmaDefaultEstimate: devicePerformance === 'low' ? 1500000 :
+                               devicePerformance === 'medium' ? 3000000 : 6000000,
+        abrBandWidthFactor: 0.95,
+        abrBandWidthUpFactor: isMobile ? 0.6 : 0.7,
+        abrMaxWithRealBitrate: true,
+        maxStarvationDelay: isMobile ? 2 : 4,
+        maxLoadingDelay: isMobile ? 2 : 4,
+
+        // v1.6.13 新增：DRM相关优化（虽然你项目不用DRM，但有助于稳定性）
+        keyLoadRetryDelay: 1000,
+        keyLoadMaxRetry: 3,
+
+        // 浏览器特殊优化
+        liveDurationInfinity: !isSafari,
+        progressive: false,
+
+        // 移动设备网络优化
+        ...(isMobile && {
+          manifestLoadingRetryDelay: 2000,
+          levelLoadingRetryDelay: 2000,
+          manifestLoadingMaxRetry: 3,
+          levelLoadingMaxRetry: 3,
+        })
+      };
+
+      const hls = new Hls(hlsConfig);
 
       const timeoutDuration = isMobile ? 3000 : 4000;
       const timeout = setTimeout(() => {
@@ -232,9 +374,24 @@ export async function getVideoResolutionFromM3u8(m3u8Url: string): Promise<{
         checkAndResolve();
       });
 
-      // 监听HLS错误
+      // 监听HLS错误 - v1.6.13增强处理
       hls.on(Hls.Events.ERROR, (event: any, data: any) => {
         console.warn('HLS测速错误:', data);
+
+        // v1.6.13 特殊处理：片段解析错误不应该导致测速失败
+        if (data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR) {
+          console.log('测速中遇到片段解析错误，v1.6.13已修复，继续测速');
+          return;
+        }
+
+        // v1.6.13 特殊处理：时间戳错误也不应该导致测速失败
+        if (data.details === Hls.ErrorDetails.BUFFER_APPEND_ERROR &&
+            data.err && data.err.message &&
+            data.err.message.includes('timestamp')) {
+          console.log('测速中遇到时间戳错误，v1.6.13已修复，继续测速');
+          return;
+        }
+
         if (data.fatal) {
           cleanup();
           reject(new Error(`HLS Error: ${data.type} - ${data.details}`));
@@ -267,4 +424,19 @@ export function cleanHtmlTags(text: string): string {
 
   // 使用 he 库解码 HTML 实体
   return he.decode(cleanedText);
+}
+
+/**
+ * 判断剧集是否已完结
+ * @param remarks 备注信息（如"已完结"、"更新至20集"、"HD"等）
+ * @returns 是否已完结
+ */
+export function isSeriesCompleted(remarks?: string): boolean {
+  if (!remarks) return false;
+
+  // 匹配规则：
+  // - "完结" 或 "已完结"
+  // - "全XX集"（如"全30集"）
+  // - 单独的"完"（但不包括"完整"）
+  return /完结|已完结|全\d+集|完(?!整)/.test(remarks);
 }
